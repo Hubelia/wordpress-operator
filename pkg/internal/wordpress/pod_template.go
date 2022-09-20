@@ -58,7 +58,7 @@ if [ ! -z "$GITHUB_APP_ID" ] ; then
     arrIN=(${IN//@// })
     GIT_CLONE_URL=$(${arrIN[1]})
     fi
-    echo $GITHUB_APP_PRIVATE_KEY > ./appcert.pem
+    echo $GITHUB_APP_PRIVATE_KEY > appcert.pem
     echo "require 'openssl'
 require 'jwt'  # https://rubygems.org/gems/jwt
 
@@ -248,14 +248,6 @@ func (wp *Wordpress) gitCloneEnv() []corev1.EnvVar {
 		{
 			Name:  "GIT_CLONE_URL",
 			Value: wp.Spec.CodeVolumeSpec.GitDir.Repository,
-		},
-		{
-			Name:  "GITHUB_APP_PRIVATE_KEY",
-			Value: wp.Spec.CodeVolumeSpec.GitDir.GitHubAppPrivateKey,
-		},
-		{
-			Name:  "GITHUB_APP_ID",
-			Value: wp.Spec.CodeVolumeSpec.GitDir.GitHubAppID,
 		},
 		{
 			Name:  "SRC_DIR",
