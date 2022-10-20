@@ -28,13 +28,13 @@ import (
 
 var (
 	// GitCloneImage is the image used by the init container that clones the code.
-	GitCloneImage = "docker.io/library/ruby"
+	GitCloneImage = "ghcr.io/hubelia/ruby-jwt:latest"
 
 	// WordpressRuntimeImage is the base image used to run your code.
 	WordpressRuntimeImage = "docker.io/bitpoke/wordpress-runtime:6.0.2-php-8.1"
 
 	// IngressClass is the default ingress class used used for creating WordPress ingresses.
-	IngressClass = ""
+	IngressClass = "hubelia-wp-stack"
 
 	// LeaderElection determines whether or not to use leader election when starting the manager.
 	LeaderElection = false
