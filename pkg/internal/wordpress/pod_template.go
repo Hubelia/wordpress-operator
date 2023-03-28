@@ -298,7 +298,9 @@ while true; do
         git config user.email "deploy@hubelia.dev"
         git config user.name "Hubelia - Wordpress Deploy"
 		git config pull.rebase false || true
-		git commit -am "Auto-commit" || true
+		if [ "$WP_ENV" = "production" ] ; then
+            git clean -f || true
+        fi
 		git pull --strategy-option=theirs origin $GIT_CLONE_REF
 		if [ -f *.sql* ] ; then
             mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "CREATE TABLE IF NOT EXISTS system_import (date DATETIME)"
@@ -413,8 +415,8 @@ while true; do
 		pwd
 		# git checkout -B "$GIT_CLONE_REF" "origin/$GIT_CLONE_REF"
 		echo "Exporting database"
-		rm -rf *.sql.enc || true
-		rm -rf *.sql || true
+        git rm -f --cached *.sql || true
+        git rm -f --cached *.sql.gz || true
 		mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 \
 		--ignore-table=$DB_NAME.system_import --ignore-table=$DB_NAME.wp_gf_entry \
 		--ignore-table=$DB_NAME.wp_gf_entry_meta --ignore-table=$DB_NAME.wp_gf_entry_notes --ignore-table=$DB_NAME.wp_db7_forms \
@@ -426,8 +428,6 @@ while true; do
 			echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in $DB_NAME.sql.gz -out $DB_NAME.sql.gz.enc -pass stdin
 			grep -qxF "wp-content/plugins/wordpress-deploy" .gitignore || echo "wp-content/plugins/wordpress-deploy" >> .gitignore
 			grep -qxF "!wp-content/uploads" .gitignore || echo "!wp-content/uploads" >> .gitignore
-			git rm -f --cached *.sql || true
-			git rm -f --cached *.sql.gz || true
 			rm -rf *.sql || true
 			rm -rf *.sql.gz || true
 			git add *
@@ -438,8 +438,6 @@ while true; do
 			git config user.name "Hubelia - Wordpress Deploy"
 			git commit -am "Publish to Production - $(date)"
 			git pull --strategy-option=theirs origin $GIT_CLONE_REF
-            git reflog expire --expire=now --all
-            git gc --aggressive --prune=now
 			echo $GIT_CLONE_URL_CLEAN
 			git remote set-url origin $GIT_CLONE_URL_CLEAN
 			git push
@@ -779,7 +777,7 @@ func (wp *Wordpress) securityContext() *corev1.SecurityContext {
 }
 
 func (wp *Wordpress) gitCloneContainer() corev1.Container {
-	return corev1.Container{
+	c := corev1.Container{
 		Name:    "git",
 		Args:    []string{"/bin/bash", "-c", gitCloneScript},
 		Image:   options.GitCloneImage,
@@ -793,6 +791,14 @@ func (wp *Wordpress) gitCloneContainer() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
+    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+        m := corev1.VolumeMount{
+            Name:      mediaVolumeName,
+            MountPath: mediaSrcMountPath,
+        }
+        c.VolumeMounts = append(c.VolumeMounts, m)
+    }
+    return c
 }
 
 func (wp *Wordpress) wpImportChanger() corev1.Container {
@@ -808,7 +814,7 @@ func (wp *Wordpress) wpImportChanger() corev1.Container {
 }
 
 func (wp *Wordpress) gitPushContainer() corev1.Container {
-	return corev1.Container{
+	c := corev1.Container{
 		Name:    "git-push",
 		Args:    []string{"/bin/bash", "-c", gitPushScript},
 		Image:   options.GitCloneImage,
@@ -822,10 +828,18 @@ func (wp *Wordpress) gitPushContainer() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
+    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+        m := corev1.VolumeMount{
+            Name:      mediaVolumeName,
+            MountPath: mediaSrcMountPath,
+        }
+        c.VolumeMounts = append(c.VolumeMounts, m)
+    }
+    return c
 }
 
 func (wp *Wordpress) gitChangeWatcher() corev1.Container {
-	return corev1.Container{
+	c := corev1.Container{
 		Name:    "git-change-watcher",
 		Args:    []string{"/bin/bash", "-c", gitChangeWatcherScript},
 		Image:   options.GitCloneImage,
@@ -839,6 +853,14 @@ func (wp *Wordpress) gitChangeWatcher() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
+    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+        m := corev1.VolumeMount{
+            Name:      mediaVolumeName,
+            MountPath: mediaSrcMountPath,
+        }
+        c.VolumeMounts = append(c.VolumeMounts, m)
+    }
+    return c
 }
 
 // nolint: funlen
