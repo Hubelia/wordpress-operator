@@ -106,8 +106,11 @@ find "$SRC_DIR" -maxdepth 1 -mindepth 1 -print0 | xargs -0 /bin/rm -rf
 
 set -x
 git config --global --add safe.directory '*'
-git clone "$GIT_CLONE_URL" "$SRC_DIR"
+git clone "$GIT_CLONE_URL" "/tmp/wordpress" --branch "$GIT_CLONE_REF"
 cd "$SRC_DIR"
+rsync -av "/tmp/wordpress/" "$SRC_DIR" && rm -rf "/tmp/wordpress/"
+rsync -av "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
+ls -la
 if [ "$WP_ENV" = "staging" ] ; then
 	echo "Staging Environment - pulling deploy plugin"
 	if [ ! -z "$GITHUB_APP_ID" ] ; then
@@ -119,7 +122,6 @@ if [ "$WP_ENV" = "staging" ] ; then
 	cd "$SRC_DIR"
 fi
 git config --global --add safe.directory '*'
-git checkout -B "$GIT_CLONE_REF" "origin/$GIT_CLONE_REF"
 if [ -f *.sql* ] ; then
     mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "CREATE TABLE IF NOT EXISTS system_import (date DATETIME)"
     db_file=$(echo *.sql.gz.enc)
@@ -145,6 +147,14 @@ if [ -f *.sql* ] ; then
     fi
     if [ "$IMPORT_DB" = true ] ; then
         echo "Importing database"
+        mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
+        CURRENTDATE=$(date +%Y-%m-%d\ %H:%M:%S)
+        echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
+        echo "CURRENTDATE: $CURRENTDATE"
+        rm /tmp/$DB_NAME.sql.gz
+        mkdir -p /mnt/backupdb || true
+        cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
+        rm -rf /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
         mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME --force < ./db.sql
         rm -rf $SRC_DIR/wp-content/deployed
         touch $SRC_DIR/wp-content/deployed
@@ -302,6 +312,7 @@ while true; do
             git clean -f || true
         fi
 		git pull --strategy-option=theirs origin $GIT_CLONE_REF
+		rsync -av "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
 		if [ -f *.sql* ] ; then
             mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "CREATE TABLE IF NOT EXISTS system_import (date DATETIME)"
             db_file=$(echo *.sql.gz.enc)
@@ -313,6 +324,14 @@ while true; do
             if [[ -n "$last_import" && "$db_date" > "$last_import" ]] || [[ -z "$last_import" ]]; then
                 export IMPORT_DB=true
                 rm -rf *.sql || true
+                mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
+                CURRENTDATE=$(date +%Y-%m-%d\ %H:%M:%S)
+                echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
+                echo "CURRENTDATE: $CURRENTDATE"
+                rm /tmp/$DB_NAME.sql.gz
+                mkdir -p /mnt/backupdb/ || true
+                cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
+                rm -rf /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
                 if [ -f *.enc ] ; then
                     if [ ! -z "$DB_ENCRYPTION_KEY" ] ; then
                         echo "Decrypting database"
@@ -791,14 +810,16 @@ func (wp *Wordpress) gitCloneContainer() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
-    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
-        m := corev1.VolumeMount{
-            Name:      mediaVolumeName,
-            MountPath: mediaSrcMountPath,
-        }
-        c.VolumeMounts = append(c.VolumeMounts, m)
-    }
-    return c
+
+	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+		m := corev1.VolumeMount{
+			Name:      mediaVolumeName,
+			MountPath: mediaSrcMountPath,
+		}
+		c.VolumeMounts = append(c.VolumeMounts, m)
+	}
+
+	return c
 }
 
 func (wp *Wordpress) wpImportChanger() corev1.Container {
@@ -828,14 +849,16 @@ func (wp *Wordpress) gitPushContainer() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
-    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
-        m := corev1.VolumeMount{
-            Name:      mediaVolumeName,
-            MountPath: mediaSrcMountPath,
-        }
-        c.VolumeMounts = append(c.VolumeMounts, m)
-    }
-    return c
+
+	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+		m := corev1.VolumeMount{
+			Name:      mediaVolumeName,
+			MountPath: mediaSrcMountPath,
+		}
+		c.VolumeMounts = append(c.VolumeMounts, m)
+	}
+
+	return c
 }
 
 func (wp *Wordpress) gitChangeWatcher() corev1.Container {
@@ -853,14 +876,16 @@ func (wp *Wordpress) gitChangeWatcher() corev1.Container {
 		},
 		SecurityContext: wp.securityContext(),
 	}
-    if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
-        m := corev1.VolumeMount{
-            Name:      mediaVolumeName,
-            MountPath: mediaSrcMountPath,
-        }
-        c.VolumeMounts = append(c.VolumeMounts, m)
-    }
-    return c
+
+	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
+		m := corev1.VolumeMount{
+			Name:      mediaVolumeName,
+			MountPath: mediaSrcMountPath,
+		}
+		c.VolumeMounts = append(c.VolumeMounts, m)
+	}
+
+	return c
 }
 
 // nolint: funlen

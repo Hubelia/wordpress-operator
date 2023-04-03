@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	codeSrcMountPath = "/var/run/presslabs.org/code/src"
+	codeSrcMountPath  = "/var/run/presslabs.org/code/src"
 	mediaSrcMountPath = codeSrcMountPath + "/" + mediaSubPath
 
 	defaultCodeMountPath   = "/app/web/wp-content"
