@@ -152,8 +152,8 @@ if [ -f *.sql* ] ; then
         echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
         echo "CURRENTDATE: $CURRENTDATE"
         rm /tmp/$DB_NAME.sql.gz
-        mkdir -p /mnt/backupdb || true
-        cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
+        mkdir -p /mnt/media/.backupdb || true
+        cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/media/.backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
         rm -rf /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
         mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME --force < ./db.sql
         rm -rf $SRC_DIR/wp-content/deployed
@@ -329,8 +329,8 @@ while true; do
                 echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
                 echo "CURRENTDATE: $CURRENTDATE"
                 rm /tmp/$DB_NAME.sql.gz
-                mkdir -p /mnt/backupdb/ || true
-                cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
+                mkdir -p /mnt/media/.backupdb/ || true
+                cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/media/.backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
                 rm -rf /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
                 if [ -f *.enc ] ; then
                     if [ ! -z "$DB_ENCRYPTION_KEY" ] ; then
