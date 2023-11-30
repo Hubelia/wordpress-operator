@@ -45,7 +45,6 @@ const (
 
 const gitCloneScript = `#!/bin/bash
 set -e
-set -o pipefail
 
 export HOME="$(mktemp -d)"
 export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$HOME/.ssh/knonw_hosts -o StrictHostKeyChecking=no"
@@ -108,8 +107,12 @@ set -x
 git config --global --add safe.directory '*'
 git clone "$GIT_CLONE_URL" "/tmp/wordpress" --branch "$GIT_CLONE_REF"
 cd "$SRC_DIR"
-rsync -av "/tmp/wordpress/" "$SRC_DIR" && rm -rf "/tmp/wordpress/"
-rsync -av "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
+echo "Synching uploads...  This may take some time depending on the amount of files"
+set +e
+rsync -a -q "/tmp/wordpress/" "$SRC_DIR" && rm -rf "/tmp/wordpress/" || true
+rsync -a -q "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
+set -e
+echo "Sync completed"
 ls -la
 if [ "$WP_ENV" = "staging" ] ; then
 	echo "Staging Environment - pulling deploy plugin"
@@ -147,12 +150,12 @@ if [ -f *.sql* ] ; then
     fi
     if [ "$IMPORT_DB" = true ] ; then
         echo "Importing database"
-        mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
-        CURRENTDATE=$(date +%Y-%m-%d\ %H:%M:%S)
+        mysqldump -h $DB_HOST -u $DB_USER -p $DB_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
+        CURRENTDATE=$(date +%Y-%m-%d\-%H:%M:%S)
         echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
         echo "CURRENTDATE: $CURRENTDATE"
         rm /tmp/$DB_NAME.sql.gz
-        mkdir -p /mnt/media/.backupdb || true
+        mkdir -p /mnt/media/.backupdb/ || true
         cp /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc /mnt/media/.backupdb/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
         rm -rf /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc || true
         mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME --force < ./db.sql
@@ -160,6 +163,8 @@ if [ -f *.sql* ] ; then
         touch $SRC_DIR/wp-content/deployed
         mkdir -p $SRC_DIR/wp-content/languages
         mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "INSERT INTO system_import (date) VALUES (NOW())"
+	else
+		echo "No database changes, skipping import..."
     fi
     rm *.sql || true
 fi
@@ -171,14 +176,14 @@ export STAGING_URL=$(echo $WORDPRESS_BOOTSTRAP_STAGING_URL | base64 --decode)
 if [ ! -z "$DECODED_URL" ] ; then
 	echo $DECODED_URL
 	echo $WP_HOME
-    wp search-replace https://$DECODED_URL $WP_HOME --allow-root
-	wp search-replace http://$DECODED_URL $WP_HOME --allow-root
+    wp search-replace https://$DECODED_URL $WP_HOME --allow-root --all-tables
+	wp search-replace http://$DECODED_URL $WP_HOME --allow-root --all-tables
 fi
 if [ ! -z "$STAGING_URL" ] ; then
 	echo $STAGING_URL
 	echo $WP_HOME
-    wp search-replace https://$STAGING_URL $WP_HOME --allow-root
-	wp search-replace http://$STAGING_URL $WP_HOME --allow-root
+    wp search-replace https://$STAGING_URL $WP_HOME --allow-root --all-tables
+	wp search-replace http://$STAGING_URL $WP_HOME --allow-root --all-tables
 fi
 wp rewrite flush --allow-root
 `
@@ -193,16 +198,17 @@ while true; do
 		if [ ! -z "$DECODED_URL" ] ; then
 			echo $DECODED_URL
 			echo $WP_HOME
-			wp search-replace https://$DECODED_URL $WP_HOME --allow-root
-			wp search-replace http://$DECODED_URL $WP_HOME --allow-root
+			wp search-replace https://$DECODED_URL $WP_HOME --allow-root --all-tables
+			wp search-replace http://$DECODED_URL $WP_HOME --allow-root --all-tables
 		fi
 		if [ ! -z "$STAGING_URL" ] ; then
 			echo $STAGING_URL
 			echo $WP_HOME
-			wp search-replace https://$STAGING_URL $WP_HOME --allow-root
-			wp search-replace http://$STAGING_URL $WP_HOME --allow-root
+			wp search-replace https://$STAGING_URL $WP_HOME --allow-root --all-tables
+			wp search-replace http://$STAGING_URL $WP_HOME --allow-root --all-tables
 		fi
 		wp rewrite flush --allow-root
+		wp cli cache clear
 		rm -rf $WP_CONTENT_DIR/deployed
 	fi
 	sleep 60;
@@ -258,14 +264,26 @@ while true; do
 	fi
 	cd $SRC_DIR
 	git config --global --add safe.directory '*'
-	git fetch
+	fetchfailedinvalid=$(cd $SRC_DIR && git fetch 2>&1 >/dev/null)
+	fetchfailedauth=$(git fetch | grep "Authentication failed")
+	fetchfailed=$fetchfailedauth$fetchfailedinvalid
+	echo "$fetchfailed"
+	echo "Fetched"
 	cd /
-	autherror=$(cd $SRC_DIR && git fetch | grep "Authentication failed")
+	invalidup=$(cd $SRC_DIR && git fetch 2>&1 >/dev/null)
+	authfailed=$(cd $SRC_DIR && git fetch | grep "Authentication failed")
+	autherror=$invalidup$authfailed$fetchfailed
+	echo "AuthError: $autherror"
 	if [ ! -z "$autherror" ] || [[ "$GIT_CLONE_URL" != *"x-access-token"* ]] ; then
 		if [ ! -z "$GITHUB_APP_ID" ] ; then
 			echo "Getting new Token"
 			echo "current gitclone url: $GIT_CLONE_URL"
 			TOKEN=$(ruby /tmp/jwt.rb)
+            if [ -z "$TOKEN" ]; then
+              echo "Error: Failed to generate JWT token. Waiting for 5 minutes before retrying..."
+              sleep 300
+              continue
+            fi
 			GITHUB_INSTALLATION_ID=$(curl -s "Accept: application/vnd.github+json" -H\
 			"Authorization: Bearer $TOKEN" https://api.github.com/app/installations | jq -r '.[].id')
 			GITHUB_REPO_NAME=$(echo $GIT_CLONE_URL | rev | cut -d/ -f1 | rev)
@@ -291,28 +309,48 @@ while true; do
 	fi
 	utdchanges=$(cd $SRC_DIR && git fetch && git status -uno | grep "up to date")
 	aheadchanges=$(cd $SRC_DIR && git fetch && git status -uno | grep "branch is ahead")
-	changes=$utdchanges$aheadchanges;
+	changes=$utdchanges$aheadchanges
 	echo "Changes: $changes"
 	if [ "$changes" = "" ] ; then
 		cd /
 		echo "$(date) Changes detected - pulling" >> /tmp/myapp.log
-		set -e
-		set -o pipefail
 		export HOME="$(mktemp -d)"
 		export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$HOME/.ssh/knonw_hosts -o StrictHostKeyChecking=no"
 		test -d "$HOME/.ssh" || mkdir "$HOME/.ssh"
-		set -x
 		cd $SRC_DIR
 		git config --global --add safe.directory '*'
-		git remote set-url origin $GIT_CLONE_URL
+		git remote set-url origin $GIT_CLONE_URL || true
         git config user.email "deploy@hubelia.dev"
         git config user.name "Hubelia - Wordpress Deploy"
 		git config pull.rebase false || true
 		if [ "$WP_ENV" = "production" ] ; then
             git clean -f || true
         fi
-		git pull --strategy-option=theirs origin $GIT_CLONE_REF
-		rsync -av "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
+
+		gitpull_error=""
+
+        while true; do
+            echo "Pulling changes..., this may take some time depending on the amount of files"
+            gitpull_error=$(git pull --strategy-option=theirs --quiet origin $GIT_CLONE_REF 2>&1)
+            if [ ! -z "$gitpull_error" ]; then
+				echo "Error when trying to pull changes...  Sleeping for 320 seconds and restarting...  Error was: $gitpull_error"
+				break
+                # No need to use 'continue' here, as the loop will restart automatically
+            else
+                # If the git pull succeeds, you may want to do something or just exit the loop
+                break
+            fi
+        done
+
+		if [ ! -z "$gitpull_error" ]; then
+			echo "Restarting in 30 seconds..."
+			sleep 30
+			continue
+		fi
+
+        echo "Synching uploads...  This may take some time depending on the amount of files"
+		rsync -a -q "$SRC_DIR/wp-content/uploads/" "/mnt/media/" || true
+		echo "Sync completed"
 		if [ -f *.sql* ] ; then
             mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "CREATE TABLE IF NOT EXISTS system_import (date DATETIME)"
             db_file=$(echo *.sql.gz.enc)
@@ -324,8 +362,8 @@ while true; do
             if [[ -n "$last_import" && "$db_date" > "$last_import" ]] || [[ -z "$last_import" ]]; then
                 export IMPORT_DB=true
                 rm -rf *.sql || true
-                mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
-                CURRENTDATE=$(date +%Y-%m-%d\ %H:%M:%S)
+                mysqldump -h $DB_HOST -u $DB_USER -p $DB_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 | gzip -8 > /tmp/$DB_NAME.sql.gz || true
+                CURRENTDATE=$(date +%Y-%m-%d\-%H:%M:%S)
                 echo $DB_ENCRYPTION_KEY | openssl aes-256-cbc -a -salt -pbkdf2 -in /tmp/$DB_NAME.sql.gz -out /tmp/${DB_NAME}_${CURRENTDATE}.sql.gz.enc -pass stdin || true
                 echo "CURRENTDATE: $CURRENTDATE"
                 rm /tmp/$DB_NAME.sql.gz
@@ -350,12 +388,15 @@ while true; do
 				rm -rf $SRC_DIR/wp-content/deployed
 				touch $SRC_DIR/wp-content/deployed
 				mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "INSERT INTO system_import (date) VALUES (NOW())"
+			else
+				echo "No changes since last db import.  Skipping..."
 			fi
 			rm *.sql || true
 		fi
 		cd /
 	fi
-	sleep 30;
+	echo "Done, sleeping 2 minutes"
+	sleep 120;
 done
 `
 
@@ -436,7 +477,7 @@ while true; do
 		echo "Exporting database"
         git rm -f --cached *.sql || true
         git rm -f --cached *.sql.gz || true
-		mysqldump -h $DB_HOST -u root -p$DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 \
+		mysqldump -h $DB_HOST -u root -p $DB_ROOT_PASSWORD $DB_NAME --hex-blob --default-character-set=utf8 \
 		--ignore-table=$DB_NAME.system_import --ignore-table=$DB_NAME.wp_gf_entry \
 		--ignore-table=$DB_NAME.wp_gf_entry_meta --ignore-table=$DB_NAME.wp_gf_entry_notes --ignore-table=$DB_NAME.wp_db7_forms \
 		--ignore-table=$DB_NAME.wp_commentmeta --ignore-table=$DB_NAME.wp_comments | gzip -8 > ./$DB_NAME.sql.gz
@@ -456,9 +497,9 @@ while true; do
 			git config user.email "deploy@hubelia.dev"
 			git config user.name "Hubelia - Wordpress Deploy"
 			git commit -am "Publish to Production - $(date)"
+      echo $GIT_CLONE_URL_CLEAN
+      git remote set-url origin $GIT_CLONE_URL_CLEAN
 			git pull --strategy-option=theirs origin $GIT_CLONE_REF
-			echo $GIT_CLONE_URL_CLEAN
-			git remote set-url origin $GIT_CLONE_URL_CLEAN
 			git push
 			mysql --host=$DB_HOST --user=$DB_USER --password=$DB_PASSWORD $DB_NAME -e "INSERT INTO system_import (date) VALUES (NOW())"
 			if [ ! -z "$PROD_GIT_CLONE_BRANCH" ] ; then
@@ -797,11 +838,12 @@ func (wp *Wordpress) securityContext() *corev1.SecurityContext {
 
 func (wp *Wordpress) gitCloneContainer() corev1.Container {
 	c := corev1.Container{
-		Name:    "git",
-		Args:    []string{"/bin/bash", "-c", gitCloneScript},
-		Image:   options.GitCloneImage,
-		Env:     wp.gitCloneEnv(),
-		EnvFrom: wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
+		Name:            "git",
+		Args:            []string{"/bin/bash", "-c", gitCloneScript},
+		Image:           options.GitCloneImage,
+		ImagePullPolicy: "IfNotPresent",
+		Env:             wp.gitCloneEnv(),
+		EnvFrom:         wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      codeVolumeName,
@@ -814,7 +856,7 @@ func (wp *Wordpress) gitCloneContainer() corev1.Container {
 	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
 		m := corev1.VolumeMount{
 			Name:      mediaVolumeName,
-			MountPath: mediaSrcMountPath,
+			MountPath: "/mnt/media",
 		}
 		c.VolumeMounts = append(c.VolumeMounts, m)
 	}
@@ -826,6 +868,7 @@ func (wp *Wordpress) wpImportChanger() corev1.Container {
 	return corev1.Container{
 		Name:            "after-import",
 		Image:           wp.Spec.Image,
+		ImagePullPolicy: "IfNotPresent",
 		VolumeMounts:    wp.volumeMounts(),
 		Env:             append(wp.env(), wp.Spec.WordpressBootstrapSpec.Env...),
 		EnvFrom:         append(wp.envFrom(), wp.Spec.WordpressBootstrapSpec.EnvFrom...),
@@ -836,11 +879,12 @@ func (wp *Wordpress) wpImportChanger() corev1.Container {
 
 func (wp *Wordpress) gitPushContainer() corev1.Container {
 	c := corev1.Container{
-		Name:    "git-push",
-		Args:    []string{"/bin/bash", "-c", gitPushScript},
-		Image:   options.GitCloneImage,
-		Env:     wp.gitCloneEnv(),
-		EnvFrom: wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
+		Name:            "git-push",
+		Args:            []string{"/bin/bash", "-c", gitPushScript},
+		Image:           options.GitCloneImage,
+		ImagePullPolicy: "IfNotPresent",
+		Env:             wp.gitCloneEnv(),
+		EnvFrom:         wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      codeVolumeName,
@@ -853,7 +897,7 @@ func (wp *Wordpress) gitPushContainer() corev1.Container {
 	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
 		m := corev1.VolumeMount{
 			Name:      mediaVolumeName,
-			MountPath: mediaSrcMountPath,
+			MountPath: "/mnt/media",
 		}
 		c.VolumeMounts = append(c.VolumeMounts, m)
 	}
@@ -863,11 +907,12 @@ func (wp *Wordpress) gitPushContainer() corev1.Container {
 
 func (wp *Wordpress) gitChangeWatcher() corev1.Container {
 	c := corev1.Container{
-		Name:    "git-change-watcher",
-		Args:    []string{"/bin/bash", "-c", gitChangeWatcherScript},
-		Image:   options.GitCloneImage,
-		Env:     wp.gitCloneEnv(),
-		EnvFrom: wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
+		Name:            "git-change-watcher",
+		Args:            []string{"/bin/bash", "-c", gitChangeWatcherScript},
+		Image:           options.GitCloneImage,
+		Env:             wp.gitCloneEnv(),
+		ImagePullPolicy: "IfNotPresent",
+		EnvFrom:         wp.Spec.CodeVolumeSpec.GitDir.EnvFrom,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      codeVolumeName,
@@ -880,7 +925,7 @@ func (wp *Wordpress) gitChangeWatcher() corev1.Container {
 	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
 		m := corev1.VolumeMount{
 			Name:      mediaVolumeName,
-			MountPath: mediaSrcMountPath,
+			MountPath: "/mnt/media",
 		}
 		c.VolumeMounts = append(c.VolumeMounts, m)
 	}
@@ -949,7 +994,7 @@ func (wp *Wordpress) prepareVolumesContainer() corev1.Container {
 	if wp.hasMediaMounts() && !wp.Spec.MediaVolumeSpec.ReadOnly {
 		m := corev1.VolumeMount{
 			Name:      mediaVolumeName,
-			MountPath: "/mnt/media",
+			MountPath: mediaSrcMountPath,
 		}
 
 		if wp.Wordpress.Spec.MediaVolumeSpec.ContentSubPath != "" {
@@ -1047,7 +1092,7 @@ func (wp *Wordpress) readinessProbe() *corev1.Probe {
 				},
 			},
 		},
-		FailureThreshold:    3,
+		FailureThreshold:    5,
 		InitialDelaySeconds: 10,
 		PeriodSeconds:       5,
 		SuccessThreshold:    1,
@@ -1067,11 +1112,11 @@ func (wp *Wordpress) livenessProbe() *corev1.Probe {
 				Port: intstr.FromInt(InternalHTTPPort),
 			},
 		},
-		FailureThreshold:    3,
+		FailureThreshold:    5,
 		InitialDelaySeconds: 10,
-		PeriodSeconds:       5,
+		PeriodSeconds:       120,
 		SuccessThreshold:    1,
-		TimeoutSeconds:      30,
+		TimeoutSeconds:      60,
 	}
 }
 
@@ -1095,7 +1140,7 @@ func (wp *Wordpress) WebPodTemplateSpec() (out corev1.PodTemplateSpec) {
 	wordpressContainer := corev1.Container{
 		Name:            "wordpress",
 		Image:           wp.Spec.Image,
-		ImagePullPolicy: wp.Spec.ImagePullPolicy,
+		ImagePullPolicy: "IfNotPresent",
 		VolumeMounts:    wp.volumeMounts(),
 		Env:             wp.env(),
 		EnvFrom:         wp.envFrom(),
